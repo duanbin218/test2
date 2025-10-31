@@ -1,0 +1,54 @@
+# ===== Python 编译与缓存 =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# ===== 虚拟环境与环境变量（避免泄露密钥）=====
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# ===== 构建/发布产物 =====
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ===== 测试与覆盖率 =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ===== 类型/静态检查缓存 =====
+.mypy_cache/
+.pytype/
+.ruff_cache/
+.pylint.d/
+
+# ===== Jupyter 与通用缓存 =====
+.ipynb_checkpoints/
+.cache/
+__snapshots__/
+
+# ===== 日志、临时文件 =====
+*.log
+*.tmp
+*.bak
+
+# ===== IDE/编辑器配置 =====
+.vscode/
+.vscode-test/
+.idea/
+*.iml
+
+# ===== 操作系统杂项 =====
+.DS_Store
+Thumbs.db

@@ -37,6 +37,10 @@ def _generate_demo_map(width: int = 200, height: int = 200) -> np.ndarray:
     cv2.rectangle(img, (120, 20), (160, 180), (255, 255, 255), thickness=2)
     cv2.circle(img, (100, 100), 15, (255, 255, 255), thickness=2)
 
+    # 由于圆形障碍会在 A 点周围形成闭合白环，原始设置会导致 A 无法离开中心区域。
+    # 这里通过绘制一条黑色缝隙打断白环，保证默认参数下存在可行通路，方便用户直接体验算法。
+    cv2.line(img, (100, 75), (100, 60), (0, 0, 0), thickness=3)
+
     return img
 
 

@@ -225,12 +225,25 @@ def trace_ring_path(
     ring_mask: np.ndarray,
     walkable_mask: np.ndarray,
     clockwise: bool = True,
-    step_divisor: int = 80,
+    anchor_count: int = 8,
 ) -> List[Coordinate]:
-    """生成从 A 点出发绕环带一圈的巡边路径。
+    """生成环绕 A 点的稀疏巡边路径点。
 
-    参数 step_divisor 用于控制沿环带采样点的密度，默认约保留 ~80 个路径段。
-    函数执行后，会在 `trace_ring_path.last_metadata` 中记录诊断信息。
+    本函数在内部仍使用 A* 连接各个锚点，并在 `trace_ring_path.last_metadata`
+    中记录完整的密集路径。但最终返回值只包含指定数量的环带锚点，
+    以满足“仅需要上下左右/对角方向几个点”的需求。
+
+    参数说明：
+        a: 起点 A 的坐标，格式为 (x, y)。
+        ring_mask: 由 `build_ring_mask` 构建的环带布尔掩膜。
+        walkable_mask: 全局可走掩膜，True 表示可通行。
+        clockwise: 是否按顺时针排序锚点，False 则为逆时针。
+        anchor_count: 希望返回的环带锚点数量，仅支持 4 或 8。
+
+    返回值：
+        指定数量的环带锚点列表，不含起点 A，本函数的密集行走路径请从
+        `trace_ring_path.last_metadata["密集路径"]` 获取，完整锚点列表亦同步存于
+        `trace_ring_path.last_metadata["锚点列表"]` 便于外部复用。
     """
 
     height, width = walkable_mask.shape
@@ -238,37 +251,83 @@ def trace_ring_path(
         raise ValueError("环带掩膜与可走掩膜尺寸不一致，无法巡边。")
     if not (0 <= a[0] < width and 0 <= a[1] < height):
         raise ValueError("起点 A 超出地图范围，无法巡边。")
+    if anchor_count not in (4, 8):
+        raise ValueError("锚点数量仅支持 4 或 8，请根据需求选择上下左右或包含对角线。")
 
     # 收集环带可走点。
     ring_points = np.argwhere(ring_mask & walkable_mask)
     ring_points = [(int(x), int(y)) for y, x in ring_points]
     if not ring_points:
         raise ValueError("环带区域内不存在可走像素，无法执行巡边。")
+    if len(ring_points) < anchor_count:
+        raise ValueError("环带可走像素数量不足，无法选出足够的锚点。")
 
     nearest = find_nearest_point_on_ring(a, ring_mask, walkable_mask)
 
-    ordered_points = order_ring_points_cw_or_ccw(ring_points, a, clockwise=clockwise)
-    if not ordered_points:
-        raise ValueError("排序后的环带点集合为空，无法巡边。")
+    ax, ay = a
 
-    # 找到最近点在排序列表中的位置，并将列表旋转为从该点开始。
-    try:
-        start_index = ordered_points.index(nearest)
-    except ValueError:
-        # 若最近点不在排序列表（理论上不会发生），退而求其次选择最接近角度的点。
-        start_index = 0
-    rotated = ordered_points[start_index:] + ordered_points[:start_index]
+    def _angle(pt: Coordinate) -> float:
+        """将点的极角转换到 [0, 2π) 区间，便于比较。"""
 
-    # 计算采样步长，确保至少包含起点与终点。
-    step = max(1, len(rotated) // step_divisor)
-    key_points: List[Coordinate] = [rotated[0]]
-    for idx in range(step, len(rotated), step):
-        key_points.append(rotated[idx])
-    if key_points[-1] != rotated[-1]:
-        key_points.append(rotated[-1])
-    # 回到起点完成一圈。
-    if key_points[-1] != rotated[0]:
-        key_points.append(rotated[0])
+        raw = math.atan2(pt[1] - ay, pt[0] - ax)
+        return raw if raw >= 0 else raw + 2 * math.pi
+
+    def _angle_diff(a1: float, a2: float) -> float:
+        """计算两个角度的最小差值。"""
+
+        diff = abs(a1 - a2) % (2 * math.pi)
+        return min(diff, 2 * math.pi - diff)
+
+    points_with_angle = [(pt, _angle(pt)) for pt in ring_points]
+    # 先按逆时针方向（角度递增）排序，后续再根据 clockwise 调整顺序。
+    points_with_angle.sort(key=lambda item: item[1])
+
+    if anchor_count == 4:
+        target_angles = [0.0, 0.5 * math.pi, 1.0 * math.pi, 1.5 * math.pi]
+    else:
+        target_angles = [
+            0.0,
+            0.25 * math.pi,
+            0.5 * math.pi,
+            0.75 * math.pi,
+            1.0 * math.pi,
+            1.25 * math.pi,
+            1.5 * math.pi,
+            1.75 * math.pi,
+        ]
+
+    used_indices: set[int] = set()
+    selected: List[Tuple[float, Coordinate]] = []
+    for target in target_angles:
+        best_idx: Optional[int] = None
+        best_diff = float("inf")
+        best_pt: Optional[Coordinate] = None
+        for idx, (pt, ang) in enumerate(points_with_angle):
+            if idx in used_indices:
+                continue
+            diff = _angle_diff(ang, target)
+            if diff < best_diff:
+                best_diff = diff
+                best_idx = idx
+                best_pt = pt
+        if best_idx is None or best_pt is None:
+            raise ValueError("未能为全部方向选出环带锚点，请检查障碍布局。")
+        used_indices.add(best_idx)
+        selected.append((points_with_angle[best_idx][1], best_pt))
+
+    # selected 按照 target_angles（逆时针）排列，如需顺时针则反转。
+    if clockwise:
+        selected = list(reversed(selected))
+
+    # 根据起点到锚点的启发式距离选择第一个锚点，使行走更自然。
+    if selected:
+        start_idx = min(
+            range(len(selected)),
+            key=lambda i: _heuristic(a, selected[i][1]),
+        )
+        selected = selected[start_idx:] + selected[:start_idx]
+
+    anchor_points: List[Coordinate] = [pt for _, pt in selected]
 
     global_path: List[Coordinate] = []
     segment_count = 0
@@ -286,7 +345,26 @@ def trace_ring_path(
     current = nearest
     local_mask = ring_mask & walkable_mask
 
-    for target in key_points[1:]:
+    # 若第一个锚点与最近点不同，先连到第一个锚点。
+    if anchor_points:
+        first_anchor = anchor_points[0]
+        if first_anchor != current:
+            try:
+                segment = astar(local_mask, current, first_anchor)
+            except ValueError:
+                try:
+                    segment = astar(walkable_mask, current, first_anchor)
+                    fallback_count += 1
+                except ValueError:
+                    skipped_points.append(first_anchor)
+                    segment = []
+            if segment:
+                global_path.extend(segment[1:])
+                current = first_anchor
+                segment_count += 1
+
+    # 依次连接其余锚点。
+    for target in anchor_points[1:]:
         if target == current:
             continue
         try:
@@ -303,6 +381,25 @@ def trace_ring_path(
         current = target
         segment_count += 1
 
+    # 回到第一个锚点以闭合环带。
+    if anchor_points:
+        first_anchor = anchor_points[0]
+        if current != first_anchor:
+            try:
+                segment = astar(local_mask, current, first_anchor)
+            except ValueError:
+                try:
+                    segment = astar(walkable_mask, current, first_anchor)
+                    fallback_count += 1
+                except ValueError:
+                    skipped_points.append(first_anchor)
+                    segment = []
+            if segment:
+                global_path.extend(segment[1:])
+                current = first_anchor
+                segment_count += 1
+
+    # 最后从首个锚点返回 A，形成完整闭环。
     if current != a:
         try:
             segment = astar(walkable_mask, current, a)
@@ -315,7 +412,7 @@ def trace_ring_path(
 
     trace_ring_path.last_metadata = {
         "环带候选点数": len(ring_points),
-        "采样点数": len(key_points),
+        "锚点数量": len(anchor_points),
         "成功段数": segment_count,
         "回退次数": fallback_count,
         "跳过点数": len(skipped_points),
@@ -323,12 +420,14 @@ def trace_ring_path(
         "最近环带点": nearest,
         "是否闭合": (global_path[-1] == a) if global_path else False,
         "总步长": len(global_path),
+        "密集路径": global_path,
+        "锚点列表": anchor_points,
     }
 
     if len(global_path) < 2:
         raise ValueError("巡边路径过短，可能没有成功绕行。")
 
-    return global_path
+    return anchor_points
 
 
 def draw_path_on_image(
@@ -341,6 +440,7 @@ def draw_path_on_image(
     """在原始图像上绘制巡边路径并保存。
 
     `color` 使用 BGR 颜色顺序。函数会额外标记起点与终点。
+    建议传入 `trace_ring_path.last_metadata["密集路径"]` 这样的密集坐标序列。
     """
 
     if bgr_img.ndim != 3 or bgr_img.shape[2] != 3:
@@ -364,7 +464,7 @@ def draw_path_on_image(
 # 为静态类型工具设置默认的元数据字典，防止属性不存在。
 trace_ring_path.last_metadata = {
     "环带候选点数": 0,
-    "采样点数": 0,
+    "锚点数量": 0,
     "成功段数": 0,
     "回退次数": 0,
     "跳过点数": 0,
@@ -372,4 +472,6 @@ trace_ring_path.last_metadata = {
     "最近环带点": (0, 0),
     "是否闭合": False,
     "总步长": 0,
+    "密集路径": [],
+    "锚点列表": [],
 }
